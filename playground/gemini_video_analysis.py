@@ -54,6 +54,7 @@ def login_form():
                 })
                 st.session_state.authenticated = True
                 st.session_state.user = response.user
+                st.session_state.session = response.session
                 st.rerun()
             except Exception as e:
                 st.error(f"Login failed: {str(e)}")

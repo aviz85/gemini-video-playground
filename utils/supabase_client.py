@@ -8,6 +8,12 @@ def init_supabase():
             st.secrets["SUPABASE_URL"],
             st.secrets["SUPABASE_KEY"]
         )
+        # Set auth if session exists
+        if 'session' in st.session_state:
+            client.auth.set_session(
+                access_token=st.session_state.session.access_token,
+                refresh_token=st.session_state.session.refresh_token
+            )
         st.session_state.supabase = client
     return st.session_state.supabase
 
