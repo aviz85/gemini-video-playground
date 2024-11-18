@@ -3,188 +3,303 @@ import time
 from pathlib import Path
 import streamlit as st
 import google.generativeai as genai
+from supabase import create_client
+
+# Initialize Supabase client
+supabase = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
+
+# Page configuration
+st.set_page_config(
+    page_title="Gemini Video Analysis",
+    page_icon="🎥",
+    layout="wide"
+)
+
+def init_session_state():
+    """Initialize session state variables"""
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    if 'user' not in st.session_state:
+        st.session_state.user = None
 
 def verify_api_key():
-    """Verify that the API key is valid"""
-    if "GEMINI_API_KEY" not in st.secrets:
-        st.error("❌ Missing GEMINI_API_KEY in Streamlit secrets")
-        st.info("Please add your API key to .streamlit/secrets.toml")
-        st.stop()
-        
+    """Verify Gemini API key"""
     try:
-        # Configure and test the API key
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        
-        # List available models
         models = genai.list_models()
-        
-        # Get models that support content generation
-        available_models = [
+        st.session_state.available_models = [
             m.name for m in models 
             if "generateContent" in m.supported_generation_methods
         ]
-        
-        if not available_models:
-            st.error("❌ No models available")
-            st.stop()
-            
-        # Store available models in session state
-        st.session_state.available_models = available_models
-        
-        # Set default model if not already selected
-        if 'selected_model' not in st.session_state:
-            st.session_state.selected_model = "models/gemini-1.5-pro"
-            
         return True
-        
     except Exception as e:
         st.error(f"❌ API key verification failed: {str(e)}")
-        st.info("""
-        Please check:
-        1. Your API key is valid
-        2. You have enabled the Gemini API
-        3. You have billing enabled (if required)
-        4. You're not using a restricted IP
-        """)
-        st.stop()
         return False
 
-# Verify API key before proceeding
-verify_api_key()
-
-def upload_video(video_file, mime_type="video/mp4"):
-    """Upload video file to Gemini API"""
-    # Save uploaded file temporarily
-    temp_path = f"temp_{video_file.name}"
-    with open(temp_path, "wb") as f:
-        f.write(video_file.getvalue())
-    
-    try:
-        file = genai.upload_file(temp_path, mime_type=mime_type)
-        return file
-    finally:
-        # Clean up temp file
-        os.remove(temp_path)
-
-def wait_for_file_processing(file):
-    """Wait for uploaded file to be processed"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    attempt = 0
-    max_attempts = 60  # 5 minutes max (with 5s sleep)
-    
-    while attempt < max_attempts:
-        status_text.text("Processing video...")
-        progress_bar.progress(attempt / max_attempts)
+def login_form():
+    """Display login form"""
+    with st.form("login"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
         
-        file = genai.get_file(file.name)
-        if file.state.name == "ACTIVE":
-            progress_bar.progress(1.0)
-            status_text.text("Video ready!")
-            return True
-        elif file.state.name == "FAILED":
-            status_text.text("❌ Video processing failed")
-            raise Exception(f"Video processing failed: {file.error}")
-            
-        time.sleep(5)
-        attempt += 1
-    
-    status_text.text("❌ Processing timeout")
-    return False
+        if submitted:
+            try:
+                response = supabase.auth.sign_in_with_password({
+                    "email": email,
+                    "password": password
+                })
+                st.session_state.authenticated = True
+                st.session_state.user = response.user
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {str(e)}")
 
-def analyze_video(video_file, prompt):
-    """Analyze video using Gemini model"""
-    model = genai.GenerativeModel(
-        model_name=st.session_state.selected_model,  # Use the selected model
-        generation_config={
-            "temperature": 0.4,
-            "top_p": 0.8,
-            "top_k": 40,
-            "max_output_tokens": 2048,
-        }
-    )
+def signup_form():
+    """Display signup form"""
+    with st.form("signup"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        confirm_password = st.text_input("Confirm Password", type="password")
+        submitted = st.form_submit_button("Sign Up")
+        
+        if submitted:
+            if password != confirm_password:
+                st.error("Passwords don't match")
+                return
+            try:
+                response = supabase.auth.sign_up({
+                    "email": email,
+                    "password": password
+                })
+                st.success("Signup successful! Please check your email to verify your account.")
+            except Exception as e:
+                st.error(f"Signup failed: {str(e)}")
+
+def show_auth_page():
+    """Display authentication page"""
+    st.title("🎥 Gemini Video Analysis")
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
-    with st.spinner("Analyzing video..."):
-        response = model.generate_content([video_file, prompt])
-        return response.text
+    with tab1:
+        login_form()
+    with tab2:
+        signup_form()
+
+def manage_prompts():
+    """Prompt management panel"""
+    st.header("📝 Prompt Management")
+    
+    # Add new prompt
+    with st.form("add_prompt"):
+        prompt_text = st.text_area("New Prompt")
+        category = st.text_input("Category (optional)")
+        submitted = st.form_submit_button("Add Prompt")
+        
+        if submitted and prompt_text:
+            supabase.table("prompts").insert({
+                "text": prompt_text,
+                "category": category,
+                "created_by": st.session_state.user.id
+            }).execute()
+            st.success("Prompt added!")
+            st.rerun()
+    
+    # List existing prompts
+    prompts = supabase.table("prompts").select("*").eq("created_by", st.session_state.user.id).execute()
+    
+    if prompts.data:
+        for prompt in prompts.data:
+            col1, col2, col3 = st.columns([3, 1, 1])
+            with col1:
+                st.text(prompt["text"])
+            with col2:
+                st.text(prompt["category"] or "")
+            with col3:
+                if st.button("Delete", key=f"del_{prompt['id']}"):
+                    supabase.table("prompts").delete().eq("id", prompt["id"]).execute()
+                    st.rerun()
+
+def manage_video_groups():
+    """Video groups management panel"""
+    st.header("📁 Video Groups")
+    
+    # Add new group
+    with st.form("add_group"):
+        group_name = st.text_input("Group Name")
+        description = st.text_area("Description")
+        submitted = st.form_submit_button("Create Group")
+        
+        if submitted and group_name:
+            supabase.table("video_groups").insert({
+                "name": group_name,
+                "description": description,
+                "created_by": st.session_state.user.id
+            }).execute()
+            st.success("Group created!")
+            st.rerun()
+    
+    # List groups
+    groups = supabase.table("video_groups").select("*").eq("created_by", st.session_state.user.id).execute()
+    
+    if groups.data:
+        for group in groups.data:
+            with st.expander(group["name"]):
+                st.write(group["description"])
+                
+                # Upload videos to group
+                uploaded_files = st.file_uploader(
+                    "Upload Videos", 
+                    type=["mp4", "mov", "avi"],
+                    accept_multiple_files=True,
+                    key=f"upload_{group['id']}"
+                )
+                
+                if uploaded_files:
+                    for video in uploaded_files:
+                        # Save video file
+                        file_path = f"videos/{video.name}"
+                        with open(file_path, "wb") as f:
+                            f.write(video.getbuffer())
+                            
+                        # Add to database
+                        supabase.table("videos").insert({
+                            "name": video.name,
+                            "file_path": file_path,
+                            "mime_type": video.type,
+                            "group_id": group["id"],
+                            "created_by": st.session_state.user.id
+                        }).execute()
+                
+                # List videos in group
+                videos = supabase.table("videos").select("*").eq("group_id", group["id"]).execute()
+                if videos.data:
+                    st.write("Videos in group:")
+                    for video in videos.data:
+                        st.write(f"- {video['name']}")
+
+def create_batch():
+    """Batch analysis creation panel"""
+    st.header("🔄 Create Analysis Batch")
+    
+    # Get user's groups
+    groups = supabase.table("video_groups").select("*").eq("created_by", st.session_state.user.id).execute()
+    
+    if not groups.data:
+        st.warning("Create a video group first!")
+        return
+        
+    # Get user's prompts
+    prompts = supabase.table("prompts").select("*").eq("created_by", st.session_state.user.id).execute()
+    
+    if not prompts.data:
+        st.warning("Create some prompts first!")
+        return
+    
+    # Create batch form
+    with st.form("create_batch"):
+        batch_name = st.text_input("Batch Name")
+        selected_group = st.selectbox("Select Video Group", options=groups.data, format_func=lambda x: x["name"])
+        selected_prompt = st.selectbox("Select Prompt", options=prompts.data, format_func=lambda x: x["text"])
+        selected_model = st.selectbox("Select Model", options=st.session_state.available_models)
+        
+        submitted = st.form_submit_button("Create Batch")
+        
+        if submitted and batch_name:
+            # Create batch
+            batch = supabase.table("analysis_batches").insert({
+                "name": batch_name,
+                "group_id": selected_group["id"],
+                "prompt_id": selected_prompt["id"],
+                "model_name": selected_model,
+                "created_by": st.session_state.user.id
+            }).execute()
+            
+            # Create analysis entries for each video
+            videos = supabase.table("videos").select("*").eq("group_id", selected_group["id"]).execute()
+            
+            for video in videos.data:
+                supabase.table("video_analysis").insert({
+                    "video_id": video["id"],
+                    "batch_id": batch.data[0]["id"],
+                    "prompt_id": selected_prompt["id"],
+                    "model_name": selected_model,
+                    "created_by": st.session_state.user.id
+                }).execute()
+            
+            st.success("Batch created!")
+            st.rerun()
+
+def view_results():
+    """Results viewer panel"""
+    st.header("📊 Analysis Results")
+    
+    # Get batches
+    batches = supabase.table("analysis_batches").select("*").eq("created_by", st.session_state.user.id).execute()
+    
+    if batches.data:
+        for batch in batches.data:
+            with st.expander(f"Batch: {batch['name']}"):
+                # Get analyses for this batch
+                analyses = supabase.table("video_analysis").select(
+                    "*, videos(name), prompts(text)"
+                ).eq("batch_id", batch["id"]).execute()
+                
+                if analyses.data:
+                    # Create dataframe for display
+                    import pandas as pd
+                    df = pd.DataFrame([{
+                        "Video": a["videos"]["name"],
+                        "Prompt": a["prompts"]["text"],
+                        "Status": a["status"],
+                        "Analysis": a["analysis"] or "",
+                        "Error": a["error"] or ""
+                    } for a in analyses.data])
+                    
+                    st.dataframe(
+                        df,
+                        column_config={
+                            "Video": st.column_config.TextColumn("Video"),
+                            "Analysis": st.column_config.TextColumn("Analysis", width="large"),
+                            "Error": st.column_config.TextColumn("Error", width="medium")
+                        }
+                    )
 
 def main():
-    st.title("🎥 Gemini Video Analysis")
-    st.write("Upload a video and ask Gemini to analyze it!")
-
-    # Model selection
-    if 'available_models' in st.session_state:
-        st.session_state.selected_model = st.selectbox(
-            "Select Gemini Model",
-            st.session_state.available_models,
-            index=st.session_state.available_models.index(st.session_state.selected_model),
-            help="Choose which Gemini model to use for analysis"
-        )
-
-    # File uploader
-    video_file = st.file_uploader(
-        "Choose a video file", 
-        type=["mp4", "mov", "avi"],
-        help="Upload a video file (MP4, MOV, or AVI format)"
-    )
-
-    # Sample prompts
-    sample_prompts = [
-        "Describe what happens in this video",
-        "What are the main actions and events?",
-        "Analyze the mood and atmosphere",
-        "List all objects and people visible",
-        "Provide a detailed timeline of events"
-    ]
+    """Main application"""
+    init_session_state()
     
-    # Prompt input
-    col1, col2 = st.columns([0.7, 0.3])
-    with col1:
-        prompt = st.text_area(
-            "Enter your analysis prompt",
-            help="Type your question or what you'd like to know about the video"
-        )
-    with col2:
-        st.write("Sample prompts:")
-        selected_prompt = st.selectbox(
-            "Select a sample prompt",
-            ["Custom"] + sample_prompts,
-            label_visibility="collapsed"
-        )
-        if selected_prompt != "Custom":
-            prompt = selected_prompt
-
-    # Analysis button
-    analyze_button = st.button(
-        "Analyze Video", 
-        disabled=not (video_file and prompt),
-        type="primary"
+    if not verify_api_key():
+        st.stop()
+    
+    if not st.session_state.authenticated:
+        show_auth_page()
+        return
+    
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio(
+        "Go to",
+        ["Prompt Management", "Video Groups", "Create Batch", "View Results"]
     )
-
-    if analyze_button:
-        try:
-            # Show video preview
-            st.video(video_file)
-            
-            # Upload to Gemini
-            with st.spinner("Uploading video..."):
-                gemini_file = upload_video(video_file)
-            
-            # Wait for processing
-            if wait_for_file_processing(gemini_file):
-                # Get analysis
-                analysis = analyze_video(gemini_file, prompt)
-                
-                # Display results
-                st.markdown("### Analysis Results")
-                st.write(analysis)
-                
-                # Cleanup
-                gemini_file.delete()
-                
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+    
+    # Logout button
+    if st.sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+    
+    # Page routing
+    if page == "Prompt Management":
+        manage_prompts()
+    elif page == "Video Groups":
+        manage_video_groups()
+    elif page == "Create Batch":
+        create_batch()
+    elif page == "View Results":
+        view_results()
 
 if __name__ == "__main__":
     main() 
