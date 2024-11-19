@@ -22,6 +22,14 @@ def delete_prompt(prompt_id):
     supabase = init_supabase()
     return supabase.table("prompts").delete().eq("id", prompt_id).execute()
 
+def edit_prompt(prompt_id, text, description):
+    """Update existing prompt"""
+    supabase = init_supabase()
+    return supabase.table("prompts").update({
+        "text": text,
+        "description": description
+    }).eq("id", prompt_id).execute()
+
 def show_prompt_management():
     """Display prompt management UI"""
     require_auth()
@@ -30,7 +38,7 @@ def show_prompt_management():
     # Add new prompt
     with st.form("add_prompt"):
         description = st.text_input("Prompt Title/Description")
-        prompt_text = st.text_area("Prompt Text", height=100)
+        prompt_text = st.text_area("Prompt Text", height=200)
         col1, col2 = st.columns([4,1])
         with col2:
             submitted = st.form_submit_button("Add Prompt", use_container_width=True)
@@ -48,13 +56,27 @@ def show_prompt_management():
     
     if prompts.data:
         for prompt in prompts.data:
-            col1, col2, col3 = st.columns([3, 1, 1])
-            with col1:
-                st.text(prompt["description"])
-            with col2:
-                created_at = prompt["created_at"].split("T")[0]  # Show only date
-                st.text(created_at)
-            with col3:
-                if st.button("Delete", key=f"del_{prompt['id']}"):
-                    delete_prompt(prompt["id"])
-                    st.rerun() 
+            with st.expander(f"📝 {prompt['description']}", expanded=False):
+                # Show created date
+                st.caption(f"Created: {prompt['created_at'].split('T')[0]}")
+                
+                # Editable fields
+                new_description = st.text_input("Title", value=prompt["description"], key=f"desc_{prompt['id']}")
+                new_text = st.text_area("Text", value=prompt["text"], height=400, key=f"text_{prompt['id']}")
+                
+                # Action buttons in columns
+                col1, col2, col3 = st.columns([1,1,4])
+                with col1:
+                    if st.button("Save", key=f"save_{prompt['id']}", type="primary", use_container_width=True):
+                        if not new_description or not new_text:
+                            st.error("Both fields are required")
+                        else:
+                            edit_prompt(prompt["id"], new_text, new_description)
+                            st.success("Updated!")
+                            st.rerun()
+                with col2:
+                    if st.button("Delete", key=f"del_{prompt['id']}", type="secondary", use_container_width=True):
+                        delete_prompt(prompt["id"])
+                        st.success("Deleted!")
+                        st.rerun()
+    
