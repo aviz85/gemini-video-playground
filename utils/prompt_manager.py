@@ -1,12 +1,12 @@
 import streamlit as st
 from utils.supabase_client import init_supabase, require_auth
 
-def add_prompt(text, category=None):
+def add_prompt(text, description):
     """Add new prompt"""
     supabase = init_supabase()
     return supabase.table("prompts").insert({
         "text": text,
-        "category": category,
+        "description": description,
         "created_by": st.session_state.user.id
     }).execute()
 
@@ -29,14 +29,19 @@ def show_prompt_management():
     
     # Add new prompt
     with st.form("add_prompt"):
-        prompt_text = st.text_area("New Prompt")
-        category = st.text_input("Category (optional)")
-        submitted = st.form_submit_button("Add Prompt")
+        description = st.text_input("Prompt Title/Description")
+        prompt_text = st.text_area("Prompt Text", height=100)
+        col1, col2 = st.columns([4,1])
+        with col2:
+            submitted = st.form_submit_button("Add Prompt", use_container_width=True)
         
-        if submitted and prompt_text:
-            add_prompt(prompt_text, category)
-            st.success("Prompt added!")
-            st.rerun()
+        if submitted:
+            if not description or not prompt_text:
+                st.error("Both fields are required")
+            else:
+                add_prompt(prompt_text, description)
+                st.success("Prompt added!")
+                st.rerun()
     
     # List existing prompts
     prompts = get_prompts()
@@ -45,9 +50,10 @@ def show_prompt_management():
         for prompt in prompts.data:
             col1, col2, col3 = st.columns([3, 1, 1])
             with col1:
-                st.text(prompt["text"])
+                st.text(prompt["description"])
             with col2:
-                st.text(prompt["category"] or "")
+                created_at = prompt["created_at"].split("T")[0]  # Show only date
+                st.text(created_at)
             with col3:
                 if st.button("Delete", key=f"del_{prompt['id']}"):
                     delete_prompt(prompt["id"])

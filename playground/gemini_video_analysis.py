@@ -1,3 +1,13 @@
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
+
+# Now imports will work
+from utils.prompt_manager import show_prompt_management
+
 import os
 import time
 from pathlib import Path
@@ -89,40 +99,6 @@ def show_auth_page():
         login_form()
     with tab2:
         signup_form()
-
-def manage_prompts():
-    """Prompt management panel"""
-    st.header("📝 Prompt Management")
-    
-    # Add new prompt
-    with st.form("add_prompt"):
-        prompt_text = st.text_area("New Prompt")
-        category = st.text_input("Category (optional)")
-        submitted = st.form_submit_button("Add Prompt")
-        
-        if submitted and prompt_text:
-            supabase.table("prompts").insert({
-                "text": prompt_text,
-                "category": category,
-                "created_by": st.session_state.user.id
-            }).execute()
-            st.success("Prompt added!")
-            st.rerun()
-    
-    # List existing prompts
-    prompts = supabase.table("prompts").select("*").eq("created_by", st.session_state.user.id).execute()
-    
-    if prompts.data:
-        for prompt in prompts.data:
-            col1, col2, col3 = st.columns([3, 1, 1])
-            with col1:
-                st.text(prompt["text"])
-            with col2:
-                st.text(prompt["category"] or "")
-            with col3:
-                if st.button("Delete", key=f"del_{prompt['id']}"):
-                    supabase.table("prompts").delete().eq("id", prompt["id"]).execute()
-                    st.rerun()
 
 def manage_video_groups():
     """Video groups management panel"""
@@ -294,7 +270,7 @@ def main():
     
     # Page routing
     if page == "Prompt Management":
-        manage_prompts()
+        show_prompt_management()
     elif page == "Video Groups":
         manage_video_groups()
     elif page == "Create Batch":
