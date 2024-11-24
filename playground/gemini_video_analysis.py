@@ -13,6 +13,7 @@ from utils.videos import manage_video_groups
 from utils.batch_manager import create_batch
 from utils.auth_manager import show_auth_page
 from utils.supabase_client import init_supabase
+from utils.results_manager import show_batch_results
 
 # Page configuration
 st.set_page_config(
@@ -25,7 +26,7 @@ PAGES = {
     "Prompt Management": show_prompt_management,
     "Video Groups": manage_video_groups,
     "Create Batch": create_batch,
-    "View Results": lambda: st.text("Results view coming soon...")  # Placeholder
+    "View Results": show_batch_results
 }
 
 def verify_api_key():
