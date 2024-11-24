@@ -328,7 +328,28 @@ def manage_video_groups():
                     st.error(f"Invalid CSV format: {str(e)}")
         
         if df is not None:
-            st.dataframe(df.head(), use_container_width=True)
+            total_rows = len(df)
+            rows_per_page = 5
+            total_pages = (total_rows + rows_per_page - 1) // rows_per_page  # Ceiling division
+
+            if total_rows > 0:
+                page = st.number_input(
+                    f"Page (1-{total_pages})", 
+                    min_value=1, 
+                    max_value=total_pages, 
+                    value=1,
+                    key=f"{csv_source}_page"  # Unique key for each tab
+                )
+                
+                start_idx = (page - 1) * rows_per_page
+                end_idx = min(start_idx + rows_per_page, total_rows)
+                
+                st.dataframe(
+                    df.iloc[start_idx:end_idx], 
+                    use_container_width=True
+                )
+                
+                st.caption(f"Showing rows {start_idx + 1}-{end_idx} of {total_rows}")
             
             if 'mediaSharePath' not in df.columns:
                 st.error("CSV must contain 'mediaSharePath' column")
@@ -395,7 +416,28 @@ def manage_video_groups():
                     st.error(f"Invalid CSV format: {str(e)}")
         
         if df is not None:
-            st.dataframe(df.head(), use_container_width=True)
+            total_rows = len(df)
+            rows_per_page = 5
+            total_pages = (total_rows + rows_per_page - 1) // rows_per_page  # Ceiling division
+
+            if total_rows > 0:
+                page = st.number_input(
+                    f"Page (1-{total_pages})", 
+                    min_value=1, 
+                    max_value=total_pages, 
+                    value=1,
+                    key=f"{csv_source}_page"  # Unique key for each tab
+                )
+                
+                start_idx = (page - 1) * rows_per_page
+                end_idx = min(start_idx + rows_per_page, total_rows)
+                
+                st.dataframe(
+                    df.iloc[start_idx:end_idx], 
+                    use_container_width=True
+                )
+                
+                st.caption(f"Showing rows {start_idx + 1}-{end_idx} of {total_rows}")
             
             if 'video_url' not in df.columns:
                 st.error("CSV must contain 'video_url' column")
@@ -428,3 +470,75 @@ def manage_video_groups():
                             )
                     else:
                         st.error(f"Invalid video URL: {row['video_url']}")
+
+def process_csv_uploads(df, group_id):
+    """Process multiple video uploads with a single progress bar"""
+    total_files = len(df)
+    
+    with st.status(f"Processing {total_files} videos...") as status:
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        for index, row in df.iterrows():
+            current = index + 1
+            progress_text.write(f"Processing video {current}/{total_files}")
+            progress_bar.progress(current/total_files)
+            
+            try:
+                # Extract video URL and metadata based on CSV type
+                video_url = row.get('mediaSharePath') or row.get('video_url')
+                if not is_valid_video_url(video_url):
+                    st.error(f"Invalid video URL: {video_url}")
+                    continue
+                
+                # Download video
+                status.write(f"⬇️ Downloading video {current}/{total_files}")
+                video_data, mime_type = download_video_from_url(video_url)
+                if not video_data:
+                    continue
+                
+                # Generate thumbnail
+                status.write(f"🖼️ Generating thumbnail {current}/{total_files}")
+                thumb_data = generate_thumbnail(video_data)
+                
+                # Upload to Gemini
+                status.write(f"📤 Uploading to Gemini {current}/{total_files}")
+                gemini_file_id = upload_to_gemini(video_data, mime_type)
+                
+                if gemini_file_id and thumb_data:
+                    # Upload thumbnail
+                    status.write(f"🖼️ Uploading thumbnail {current}/{total_files}")
+                    thumb_path = upload_thumbnail(gemini_file_id, thumb_data)
+                    
+                    # Add to database
+                    metadata = create_metadata_from_row(row)
+                    add_video(gemini_file_id, group_id, metadata, thumb_path, video_url)
+                    
+            except Exception as e:
+                st.error(f"Failed to process video {current}: {str(e)}")
+                continue
+        
+        if index == total_files - 1:
+            status.update(label=f"✅ Processed {total_files} videos", state="complete")
+        else:
+            status.update(label=f"⚠️ Completed with some errors", state="error")
+
+def create_metadata_from_row(row):
+    """Create metadata dict from CSV row"""
+    if 'mediaSharePath' in row:  # Dreemz CSV
+        return {
+            'title': row['title'],
+            'relateId': row['relateId'] if pd.notna(row['relateId']) else None,
+            'score': int(row['score']) if pd.notna(row['score']) else None
+        }
+    else:  # Generic CSV
+        metadata = {}
+        if 'title' in row:
+            metadata['title'] = row['title']
+        if 'metadata' in row and pd.notna(row['metadata']):
+            try:
+                additional_metadata = json.loads(row['metadata'])
+                metadata.update(additional_metadata)
+            except json.JSONDecodeError:
+                st.warning(f"Invalid JSON metadata for URL: {row['video_url']}")
+        return metadata

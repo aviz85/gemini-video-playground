@@ -1,6 +1,6 @@
 import streamlit as st
 from utils.supabase_client import init_supabase, require_auth
-from utils.videos import get_video_groups, get_group_videos, get_thumbnail_url
+from utils.videos import get_video_groups, get_group_videos
 from utils.prompt_manager import get_prompts
 import google.generativeai as genai
 
@@ -26,26 +26,13 @@ def create_batch():
     selected_group = st.selectbox("Select Video Group", options=list(group_options.keys()))
     group_id = group_options[selected_group]
 
-    # Get videos in group
+    # Get videos count in group
     videos = get_group_videos(group_id)
     if not videos.data:
         st.warning("Add videos to the selected group first")
         return
 
-    # Display videos with thumbnails
-    st.subheader("Videos in Group")
-    cols = st.columns(4)
-    selected_videos = []
-
-    for idx, video in enumerate(videos.data):
-        with cols[idx % 4]:
-            if video["thumbnail_path"]:
-                thumb_url = get_thumbnail_url(video["thumbnail_path"])
-                st.image(thumb_url, use_column_width=True)
-            
-            selected = st.checkbox("Select", key=f"vid_{video['id']}")
-            if selected:
-                selected_videos.append(video)
+    st.info(f"Selected group contains {len(videos.data)} videos")
 
     # Select prompts
     st.subheader("Select Prompts")
@@ -61,8 +48,8 @@ def create_batch():
     )
 
     # Create batch
-    if st.button("Create Batch", disabled=not (selected_videos and selected_prompts)):
-        create_analysis_batch(selected_videos, selected_prompts, model_name)
+    if st.button("Create Batch", disabled=not selected_prompts):
+        create_analysis_batch(videos.data, selected_prompts, model_name)
 
 def create_analysis_batch(videos, prompts, model_name):
     """Create a new analysis batch"""
