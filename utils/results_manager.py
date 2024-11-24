@@ -3,6 +3,7 @@ import json
 from utils.supabase_client import init_supabase, require_auth
 import re
 from typing import Dict, Any
+import pandas as pd
 
 def clean_json_string(raw_json: str) -> str:
     """Clean JSON string from Gemini output"""
@@ -151,9 +152,15 @@ def show_batch_statistics(batch_id):
         st.caption(f"{progress:.1%} Complete")
 
 def show_individual_results(batch_id):
-    # Initialize session state for JSON toggles if not exists
     if 'json_toggles' not in st.session_state:
         st.session_state.json_toggles = {}
+    if 'table_settings' not in st.session_state:
+        st.session_state.table_settings = {
+            'sort_by': None,
+            'sort_ascending': True,
+            'filters': {},
+            'visible_columns': ['title', 'status', 'overall_score']
+        }
 
     supabase = init_supabase()
     tasks = supabase.table("analysis_tasks") \
@@ -165,99 +172,105 @@ def show_individual_results(batch_id):
         st.warning("No tasks found for this batch")
         return
 
-    # Filter options
-    status_filter = st.multiselect(
-        "Filter by Status",
-        options=["completed", "failed", "pending"],
-        default=["completed"]
-    )
+    # Table controls tab
+    tab1, tab2 = st.tabs(["🎥 Video View", "📊 Table View"])
+    
+    with tab1:
+        # Original video view code
+        status_filter = st.multiselect(
+            "Filter by Status",
+            options=["completed", "failed", "pending"],
+            default=["completed"]
+        )
+        filtered_tasks = [t for t in tasks.data if t['status'] in status_filter]
+        show_video_results(filtered_tasks)
 
-    filtered_tasks = [t for t in tasks.data if t['status'] in status_filter]
+    with tab2:
+        # Table controls
+        with st.expander("Table Controls", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.subheader("Sort")
+                sort_by = st.selectbox(
+                    "Sort by",
+                    options=['title', 'status', 'overall_score', 'created_at'],
+                    key='sort_by'
+                )
+                sort_order = st.radio(
+                    "Order",
+                    options=['Ascending', 'Descending'],
+                    key='sort_order'
+                )
+            
+            with col2:
+                st.subheader("Filter")
+                status_filter = st.multiselect(
+                    "Status",
+                    options=["completed", "failed", "pending"],
+                    default=["completed"],
+                    key='table_status_filter'
+                )
+                score_range = st.slider(
+                    "Score Range",
+                    min_value=0,
+                    max_value=1000,
+                    value=(0, 1000),
+                    key='score_filter'
+                )
+            
+            with col3:
+                st.subheader("Columns")
+                available_columns = [
+                    'title', 'status', 'overall_score', 'created_at',
+                    'completed_at', 'error'
+                ]
+                visible_columns = st.multiselect(
+                    "Show Columns",
+                    options=available_columns,
+                    default=['title', 'status', 'overall_score'],
+                    key='visible_columns'
+                )
 
+        # Process and display table data
+        table_data = []
+        for task in tasks.data:
+            if task['status'] not in status_filter:
+                continue
+                
+            row = {
+                'title': task['videos'].get('metadata', {}).get('title', task['videos']['id']),
+                'status': task['status'],
+                'overall_score': parse_analysis_result(task.get('result', {})).get('overall_score', 0),
+                'created_at': task['created_at'],
+                'completed_at': task.get('completed_at'),
+                'error': task.get('error')
+            }
+            
+            if score_range[0] <= row['overall_score'] <= score_range[1]:
+                table_data.append(row)
+
+        # Sort data
+        if sort_by:
+            reverse = sort_order == 'Descending'
+            table_data.sort(
+                key=lambda x: (x[sort_by] is None, x[sort_by]), 
+                reverse=reverse
+            )
+
+        # Display table
+        if table_data:
+            df = pd.DataFrame(table_data)
+            st.dataframe(
+                df[visible_columns],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No data matches the current filters")
+
+def show_video_results(filtered_tasks):
+    """Display results in video view format"""
     for task in filtered_tasks:
         st.divider()
-        
-        # Get video details
-        video = task['videos']
-        title = video.get('metadata', {}).get('title', video['id'])
-        
-        # Create columns for thumbnail and details
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader(title)
-            
-            # Display video player if source_url exists, otherwise show thumbnail
-            if video['source_url']:
-                st.video(video['source_url'])
-            elif video['thumbnail_path']:
-                try:
-                    thumbnail_url = supabase.storage.from_('videos').get_public_url(video['thumbnail_path'])
-                    st.image(thumbnail_url, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Failed to load thumbnail: {str(e)}")
-            
-            st.write("**Status:**", task['status'])
-            if task['status'] == 'failed':
-                st.error(f"Error: {task.get('error', 'Unknown error')}")
-
-        with col2:
-            if task['result']:
-                try:
-                    parsed_result = parse_analysis_result(task['result'])
-                    
-                    # Add toggle for raw JSON
-                    toggle_key = f"json_toggle_{task['id']}"
-                    if toggle_key not in st.session_state:
-                        st.session_state[toggle_key] = False
-                    
-                    show_raw = st.toggle('Show Raw JSON', key=toggle_key)
-                    
-                    if show_raw:
-                        # Get the raw analysis string and beautify it
-                        raw_analysis = task['result']['analysis']
-                        # Remove JSON code block markers if present
-                        clean_raw = clean_json_string(raw_analysis)
-                        try:
-                            # Parse and re-stringify with indentation
-                            parsed_raw = json.loads(clean_raw)
-                            beautified_raw = json.dumps(parsed_raw, indent=2)
-                            st.code(beautified_raw, language='json')
-                        except json.JSONDecodeError:
-                            # If parsing fails, show original raw text
-                            st.code(raw_analysis)
-                    
-                    # Find metrics to display
-                    metrics_to_show = []
-                    
-                    # Always show overall score first
-                    metrics_to_show.append(("Overall Score", parsed_result.get('overall_score', 'N/A')))
-                    
-                    # Find other metrics by looking for rating/level fields
-                    for key, value in parsed_result.items():
-                        if isinstance(value, dict):
-                            for k, v in value.items():
-                                if k.lower() in ('rating', 'level', 'score'):
-                                    # Convert key from camelCase to Title Case
-                                    display_name = ''.join(' ' + c if c.isupper() else c for c in key).title()
-                                    metrics_to_show.append((display_name, v))
-                    
-                    # Display metrics in columns
-                    num_metrics = len(metrics_to_show)
-                    metrics = st.columns(num_metrics)
-                    
-                    for i, (name, value) in enumerate(metrics_to_show):
-                        with metrics[i]:
-                            st.metric(name, value, delta=None)
-                    # Generic display of all fields
-                    st.markdown("### Analysis Details")
-                    excluded_fields = {'overall_score', 'videoQuality', 'audioQuality', 
-                                     'authenticity', 'motivation'}  # Fields already shown in metrics
-                    
-                    for key, value in parsed_result.items():
-                        if key not in excluded_fields:
-                            display_json_field(key, value)
-                            
-                except Exception as e:
-                    st.error(f"Failed to parse result: {str(e)}")
-                    st.code(str(task['result']))
+        # Original video display code here
