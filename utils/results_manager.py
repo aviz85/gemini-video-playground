@@ -359,6 +359,17 @@ def show_individual_results(batch_id):
 
     filtered_tasks = [t for t in tasks.data if t['status'] in status_filter]
 
+    # Pagination
+    items_per_page = 20
+    total_pages = len(filtered_tasks) // items_per_page + (1 if len(filtered_tasks) % items_per_page else 0)
+    
+    col1, col2, col3 = st.columns([2, 4, 2])
+    with col2:
+        current_page = st.selectbox('Page', range(1, total_pages + 1), 1) if total_pages > 0 else 1
+    
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, len(filtered_tasks))
+    
     # Sort tasks if sort field is set
     if st.session_state.sort_field:
         filtered_tasks.sort(
@@ -371,6 +382,12 @@ def show_individual_results(batch_id):
             reverse=st.session_state.sort_direction == 'desc'
         )
 
+    # Display page info
+    st.write(f"Showing {start_idx + 1}-{end_idx} of {len(filtered_tasks)} results")
+
+    # Only process tasks for current page
+    page_tasks = filtered_tasks[start_idx:end_idx]
+
     # At top of show_individual_results
     sort_icons = {
         'asc': '↑',
@@ -378,7 +395,7 @@ def show_individual_results(batch_id):
         None: '↕'  # Default icon showing it's sortable
     }
 
-    for task in filtered_tasks:
+    for task in page_tasks:
         st.divider()
         
         # Get video details
