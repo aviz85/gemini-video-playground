@@ -9,6 +9,8 @@ from io import BytesIO
 from PIL import Image
 import requests
 from urllib.parse import urlparse
+import json
+import pandas as pd
 
 def upload_to_gemini(file_path, mime_type):
     """Upload file to Gemini API"""
@@ -122,7 +124,7 @@ def upload_thumbnail(video_id, thumb_data):
         st.error(f"Failed to upload thumbnail: {str(e)}")
         return None
 
-def add_video(gemini_file_id, group_id, thumbnail_path=None, source_url=None):
+def add_video(gemini_file_id, group_id, metadata=None, thumbnail_path=None, source_url=None):
     """Add video to database"""
     supabase = init_supabase()
     return supabase.table("videos").insert({
@@ -130,6 +132,7 @@ def add_video(gemini_file_id, group_id, thumbnail_path=None, source_url=None):
         "group_id": group_id,
         "thumbnail_path": thumbnail_path,
         "source_url": source_url,
+        "metadata": metadata or {},  # Default empty JSON if None
         "created_by": st.session_state.user.id
     }).execute()
 
@@ -168,6 +171,29 @@ def download_video_from_url(url):
         st.error(f"Failed to download video: {str(e)}")
         return None, None
 
+def process_video_upload(video_data, source_url, group_id, mime_type=None, metadata=None):
+    """Process video upload from either file or URL"""
+    with st.status("Processing video...") as status:
+        # Generate thumbnail
+        status.write("Generating thumbnail...")
+        thumb_data = generate_thumbnail(video_data)
+        
+        # Upload to Gemini
+        status.write("Uploading to Gemini...")
+        mime_type = mime_type or getattr(video_data, 'type', 'video/mp4')
+        gemini_file_id = upload_to_gemini(video_data, mime_type)
+        
+        if gemini_file_id and thumb_data:
+            # Upload thumbnail
+            status.write("Uploading thumbnail...")
+            thumb_path = upload_thumbnail(gemini_file_id, thumb_data)
+            
+            # Add to database with metadata
+            add_video(gemini_file_id, group_id, metadata, thumb_path, source_url)
+            status.update(label="✅ Upload complete", state="complete")
+        else:
+            status.update(label="❌ Upload failed", state="error")
+
 def manage_video_groups():
     """Video groups management UI"""
     require_auth()
@@ -199,7 +225,12 @@ def manage_video_groups():
 
     # Upload section
     st.subheader("📤 Upload Videos")
-    tab1, tab2 = st.tabs(["Upload Files", "Add from URL"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Upload Files", 
+        "Add from URL", 
+        "Import Dreemz CSV",
+        "Add from CSV"
+    ])
 
     # Get group options
     group_options = {g["name"]: g["id"] for g in groups.data}
@@ -215,43 +246,185 @@ def manage_video_groups():
             key="file_upload"
         )
         
+        # Add metadata input
+        metadata_str = st.text_area(
+            "Metadata (JSON)",
+            placeholder='{"key": "value", "another_key": "another_value"}',
+            help="Enter video metadata as JSON"
+        )
+        
         if uploaded_files:
+            try:
+                metadata = json.loads(metadata_str) if metadata_str else {}
+            except json.JSONDecodeError:
+                st.error("Invalid JSON format in metadata")
+                return
+                
             for video in uploaded_files:
-                process_video_upload(video, None, group_id)
+                process_video_upload(video, None, group_id, metadata=metadata)
 
     # URL upload tab
     with tab2:
         with st.form("url_form"):
             url = st.text_input("Video URL", placeholder="https://example.com/video.mp4")
+            metadata_str = st.text_area(
+                "Metadata (JSON)",
+                placeholder='{"key": "value", "another_key": "another_value"}',
+                help="Enter video metadata as JSON"
+            )
             submitted = st.form_submit_button("Add URL")
             
             if submitted and url:
+                try:
+                    metadata = json.loads(metadata_str) if metadata_str else {}
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON format in metadata")
+                    return
+                    
                 if is_valid_video_url(url):
                     video_data, mime_type = download_video_from_url(url)
                     if video_data:
-                        process_video_upload(video_data, url, group_id, mime_type)
+                        process_video_upload(video_data, url, group_id, mime_type, metadata)
                 else:
                     st.error("Invalid video URL")
 
-def process_video_upload(video_data, source_url, group_id, mime_type=None):
-    """Process video upload from either file or URL"""
-    with st.status("Processing video...") as status:
-        # Generate thumbnail
-        status.write("Generating thumbnail...")
-        thumb_data = generate_thumbnail(video_data)
+    # Dreemz CSV import tab
+    with tab3:
+        st.markdown("""
+        ### Dreemz CSV Format
+        Your CSV should have these columns:
+        - `mediaSharePath`: URL to the video file
+        - `title`: Video title
+        - `relateId`: Related ID
+        - `score`: Score value
+        """)
         
-        # Upload to Gemini
-        status.write("Uploading to Gemini...")
-        mime_type = mime_type or getattr(video_data, 'type', 'video/mp4')
-        gemini_file_id = upload_to_gemini(video_data, mime_type)
+        csv_source = st.radio(
+            "CSV Source",
+            ["Upload File", "Paste Text"],
+            key="dreemz_csv_source"
+        )
         
-        if gemini_file_id and thumb_data:
-            # Upload thumbnail
-            status.write("Uploading thumbnail...")
-            thumb_path = upload_thumbnail(gemini_file_id, thumb_data)
-            
-            # Add to database
-            add_video(gemini_file_id, group_id, thumb_path, source_url)
-            status.update(label="✅ Upload complete", state="complete")
+        df = None
+        if csv_source == "Upload File":
+            uploaded_csv = st.file_uploader(
+                "Upload Dreemz CSV File", 
+                type=["csv"],
+                key="dreemz_csv_upload"
+            )
+            if uploaded_csv:
+                df = pd.read_csv(uploaded_csv)
         else:
-            status.update(label="❌ Upload failed", state="error")
+            csv_text = st.text_area(
+                "Paste CSV Content",
+                height=200,
+                help="Paste your CSV content here",
+                key="dreemz_csv_text"
+            )
+            if csv_text:
+                try:
+                    df = pd.read_csv(BytesIO(csv_text.encode()), sep=',')
+                except Exception as e:
+                    st.error(f"Invalid CSV format: {str(e)}")
+        
+        if df is not None:
+            st.dataframe(df.head(), use_container_width=True)
+            
+            if 'mediaSharePath' not in df.columns:
+                st.error("CSV must contain 'mediaSharePath' column")
+                return
+            
+            if st.button("Process Dreemz CSV"):
+                for _, row in df.iterrows():
+                    metadata = {
+                        'title': row['title'],
+                        'relateId': row['relateId'] if pd.notna(row['relateId']) else None,
+                        'score': int(row['score']) if pd.notna(row['score']) else None
+                    }
+                    
+                    video_url = row['mediaSharePath']
+                    if is_valid_video_url(video_url):
+                        video_data, mime_type = download_video_from_url(video_url)
+                        if video_data:
+                            process_video_upload(
+                                video_data=video_data,
+                                source_url=video_url,
+                                group_id=group_id,
+                                mime_type=mime_type,
+                                metadata=metadata
+                            )
+                    else:
+                        st.error(f"Invalid video URL: {video_url}")
+
+    # Generic CSV import tab
+    with tab4:
+        st.markdown("""
+        ### CSV Format
+        Your CSV should have these columns:
+        - `video_url`: URL to the video file
+        - `title` (optional): Video title
+        - `metadata` (optional): Additional JSON metadata
+        """)
+        
+        csv_source = st.radio(
+            "CSV Source",
+            ["Upload File", "Paste Text"],
+            key="generic_csv_source"
+        )
+        
+        df = None
+        if csv_source == "Upload File":
+            uploaded_csv = st.file_uploader(
+                "Upload CSV File", 
+                type=["csv"],
+                key="generic_csv_upload"
+            )
+            if uploaded_csv:
+                df = pd.read_csv(uploaded_csv)
+        else:
+            csv_text = st.text_area(
+                "Paste CSV Content",
+                height=200,
+                help="Paste your CSV content here",
+                key="generic_csv_text"
+            )
+            if csv_text:
+                try:
+                    df = pd.read_csv(BytesIO(csv_text.encode()), sep=',')
+                except Exception as e:
+                    st.error(f"Invalid CSV format: {str(e)}")
+        
+        if df is not None:
+            st.dataframe(df.head(), use_container_width=True)
+            
+            if 'video_url' not in df.columns:
+                st.error("CSV must contain 'video_url' column")
+                return
+            
+            if st.button("Process CSV"):
+                for _, row in df.iterrows():
+                    metadata = {}
+                    if 'title' in df.columns:
+                        metadata['title'] = row['title']
+                    
+                    # Parse additional metadata if exists
+                    if 'metadata' in df.columns and pd.notna(row['metadata']):
+                        try:
+                            additional_metadata = json.loads(row['metadata'])
+                            metadata.update(additional_metadata)
+                        except json.JSONDecodeError:
+                            st.warning(f"Invalid JSON metadata for URL: {row['video_url']}")
+                    
+                    # Download and process video
+                    if is_valid_video_url(row['video_url']):
+                        video_data, mime_type = download_video_from_url(row['video_url'])
+                        if video_data:
+                            process_video_upload(
+                                video_data=video_data,
+                                source_url=row['video_url'],
+                                group_id=group_id,
+                                mime_type=mime_type,
+                                metadata=metadata
+                            )
+                    else:
+                        st.error(f"Invalid video URL: {row['video_url']}")
