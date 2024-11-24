@@ -332,6 +332,13 @@ def show_individual_results(batch_id):
     # Initialize session state for JSON toggles if not exists
     if 'json_toggles' not in st.session_state:
         st.session_state.json_toggles = {}
+    if 'table_settings' not in st.session_state:
+        st.session_state.table_settings = {
+            'sort_by': None,
+            'sort_ascending': True,
+            'filters': {},
+            'visible_columns': ['title', 'status', 'overall_score']
+        }
 
     supabase = init_supabase()
     tasks = supabase.table("analysis_tasks") \
