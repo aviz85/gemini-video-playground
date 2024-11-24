@@ -177,8 +177,22 @@ def show_individual_results(batch_id):
                 try:
                     parsed_result = parse_analysis_result(task['result'])
                     
-                    # Display metrics and other info...
+                    # Display key metrics
+                    metrics = st.columns(4)
+                    with metrics[0]:
+                        st.metric("Video Quality", f"{parsed_result.get('videoQuality', {}).get('rating', 'N/A')}/5")
+                    with metrics[1]:
+                        st.metric("Audio Quality", f"{parsed_result.get('audioQuality', {}).get('rating', 'N/A')}/5")
+                    with metrics[2]:
+                        st.metric("Authenticity", f"{parsed_result.get('authenticity', {}).get('level', 'N/A')}/5")
+                    with metrics[3]:
+                        st.metric("Motivation", f"{parsed_result.get('motivation', {}).get('level', 'N/A')}/5")
                     
+                    # Show additional details
+                    st.write("**Summary:**", parsed_result.get('summary', 'N/A'))
+                    st.write("**Skills:**", ", ".join(parsed_result.get('professionalSkills', [])))
+                    st.write("**Tags:**", ", ".join(parsed_result.get('tags', [])))
+                                        
                     # Toggle button for JSON
                     toggle_key = f"json_{task['id']}"
                     if toggle_key not in st.session_state.json_toggles:
