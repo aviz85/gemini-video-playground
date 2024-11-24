@@ -18,34 +18,63 @@ def parse_analysis_result(result: Dict[str, Any]) -> Dict:
         return {}
         
     try:
-        # Clean the JSON string
         clean_json = clean_json_string(result['analysis'])
-        
-        # Parse the cleaned JSON
         parsed = json.loads(clean_json)
         
-        # Format specific fields for better display
-        if 'videoQuality' in parsed:
-            parsed['videoQuality'] = {
-                'rating': parsed['videoQuality']['visual'],
-                'details': parsed['videoQuality']['description']
-            }
-            
-        if 'categories' in parsed:
-            parsed['categories'] = parsed['categories']['selections']
-            
-        if 'toxicity' in parsed:
-            parsed['toxicity'] = {
-                'acceptable': parsed['toxicity']['isAcceptable'],
-                'level': parsed['toxicity']['level'],
-                'notes': parsed['toxicity']['reason'] or 'None'
-            }
-            
+        # Find all numeric values in the parsed result that end with level/rating
+        score_components = []
+        for key, value in parsed.items():
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if (k.lower().endswith(('level', 'rating', 'score')) and 
+                        isinstance(v, (int, float))):
+                        score_components.append(v)
+        
+        # Calculate overall score (0-1000)
+        valid_scores = [s for s in score_components if s > 0]
+        parsed['overall_score'] = round((sum(valid_scores) / len(valid_scores)) * 100) if valid_scores else 0
+        
         return parsed
         
     except json.JSONDecodeError as e:
         st.error(f"Failed to parse JSON: {str(e)}")
         return {'error': 'Invalid JSON format'}
+
+def display_json_field(key: str, value: Any, level: int = 0):
+    """Recursively display JSON fields with proper formatting"""
+    indent = "  " * level
+    
+    if isinstance(value, dict):
+        # Handle dictionary with level + description pattern
+        if 'level' in value and 'description' in value:
+            st.markdown(f"{indent}**{key}:** {value['level']} - {value['description']}")
+            return
+            
+        # Handle boolean fields with checkmarks
+        if any(k.startswith('is') for k in value.keys()):
+            bool_fields = [f"{k}: {'✅' if v else '❌'}" for k, v in value.items() if k.startswith('is')]
+            other_fields = {k: v for k, v in value.items() if not k.startswith('is') and k not in ['level', 'description']}
+            
+            if bool_fields:
+                st.markdown(f"{indent}**{key}:** {', '.join(bool_fields)}")
+            if other_fields:
+                for k, v in other_fields.items():
+                    display_json_field(k, v, level + 1)
+            return
+            
+        # Handle version fields
+        if 'version' in value:
+            st.markdown(f"{indent}**{key}:** {value['version']}")
+            return
+            
+        # Default dictionary handling
+        st.markdown(f"{indent}**{key}:**")
+        for k, v in value.items():
+            if k not in ['level', 'description', 'version']:
+                display_json_field(k, v, level + 1)
+    else:
+        if not key.lower().endswith(('level', 'version')):
+            st.markdown(f"{indent}**{key}:** {value}")
 
 def show_batch_results():
     """Show analysis results"""
@@ -177,36 +206,58 @@ def show_individual_results(batch_id):
                 try:
                     parsed_result = parse_analysis_result(task['result'])
                     
-                    # Display key metrics
-                    metrics = st.columns(4)
-                    with metrics[0]:
-                        st.metric("Video Quality", f"{parsed_result.get('videoQuality', {}).get('rating', 'N/A')}/5")
-                    with metrics[1]:
-                        st.metric("Audio Quality", f"{parsed_result.get('audioQuality', {}).get('rating', 'N/A')}/5")
-                    with metrics[2]:
-                        st.metric("Authenticity", f"{parsed_result.get('authenticity', {}).get('level', 'N/A')}/5")
-                    with metrics[3]:
-                        st.metric("Motivation", f"{parsed_result.get('motivation', {}).get('level', 'N/A')}/5")
+                    # Add toggle for raw JSON
+                    toggle_key = f"json_toggle_{task['id']}"
+                    if toggle_key not in st.session_state:
+                        st.session_state[toggle_key] = False
                     
-                    # Show additional details
-                    st.write("**Summary:**", parsed_result.get('summary', 'N/A'))
-                    st.write("**Skills:**", ", ".join(parsed_result.get('professionalSkills', [])))
-                    st.write("**Tags:**", ", ".join(parsed_result.get('tags', [])))
-                                        
-                    # Toggle button for JSON
-                    toggle_key = f"json_{task['id']}"
-                    if toggle_key not in st.session_state.json_toggles:
-                        st.session_state.json_toggles[toggle_key] = False
-                        
-                    if st.button(
-                        "Hide Raw JSON" if st.session_state.json_toggles[toggle_key] else "Show Raw JSON", 
-                        key=f"toggle_{task['id']}"
-                    ):
-                        st.session_state.json_toggles[toggle_key] = not st.session_state.json_toggles[toggle_key]
+                    show_raw = st.toggle('Show Raw JSON', key=toggle_key)
                     
-                    if st.session_state.json_toggles[toggle_key]:
-                        st.code(json.dumps(parsed_result, indent=2), language="json")
-                        
+                    if show_raw:
+                        # Get the raw analysis string and beautify it
+                        raw_analysis = task['result']['analysis']
+                        # Remove JSON code block markers if present
+                        clean_raw = clean_json_string(raw_analysis)
+                        try:
+                            # Parse and re-stringify with indentation
+                            parsed_raw = json.loads(clean_raw)
+                            beautified_raw = json.dumps(parsed_raw, indent=2)
+                            st.code(beautified_raw, language='json')
+                        except json.JSONDecodeError:
+                            # If parsing fails, show original raw text
+                            st.code(raw_analysis)
+                    
+                    # Find metrics to display
+                    metrics_to_show = []
+                    
+                    # Always show overall score first
+                    metrics_to_show.append(("Overall Score", parsed_result.get('overall_score', 'N/A')))
+                    
+                    # Find other metrics by looking for rating/level fields
+                    for key, value in parsed_result.items():
+                        if isinstance(value, dict):
+                            for k, v in value.items():
+                                if k.lower() in ('rating', 'level', 'score'):
+                                    # Convert key from camelCase to Title Case
+                                    display_name = ''.join(' ' + c if c.isupper() else c for c in key).title()
+                                    metrics_to_show.append((display_name, v))
+                    
+                    # Display metrics in columns
+                    num_metrics = len(metrics_to_show)
+                    metrics = st.columns(num_metrics)
+                    
+                    for i, (name, value) in enumerate(metrics_to_show):
+                        with metrics[i]:
+                            st.metric(name, value, delta=None)
+                    # Generic display of all fields
+                    st.markdown("### Analysis Details")
+                    excluded_fields = {'overall_score', 'videoQuality', 'audioQuality', 
+                                     'authenticity', 'motivation'}  # Fields already shown in metrics
+                    
+                    for key, value in parsed_result.items():
+                        if key not in excluded_fields:
+                            display_json_field(key, value)
+                            
                 except Exception as e:
                     st.error(f"Failed to parse result: {str(e)}")
                     st.code(str(task['result']))
