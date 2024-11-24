@@ -10,3 +10,5 @@ requests>=2.31.0
 urllib3>=2.0.0
 pandas>=2.0.0
 requests>=2.31.0
+plotly>=5.19.0
+scipy>=1.11.0

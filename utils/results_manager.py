@@ -3,6 +3,10 @@ import json
 from utils.supabase_client import init_supabase, require_auth
 import re
 from typing import Dict, Any
+import plotly.express as px
+import plotly.figure_factory as ff
+import pandas as pd
+import numpy as np
 
 def clean_json_string(raw_json: str) -> str:
     """Clean JSON string from Gemini output"""
@@ -81,10 +85,14 @@ def show_batch_results():
     require_auth()
     st.header("📊 Analysis Results")
 
-    # Get all batches for user
+    # Get all batches for user with related data
     supabase = init_supabase()
     batches = supabase.table("analysis_batches") \
-        .select("*") \
+        .select("""
+            *,
+            video_groups!inner(name),
+            prompts!inner(description, text)
+        """) \
         .eq("created_by", st.session_state.user.id) \
         .order("created_at", desc=True) \
         .execute()
@@ -93,9 +101,12 @@ def show_batch_results():
         st.info("No analysis batches found")
         return
 
-    # Select batch
+    # Select batch with enhanced info
     batch_options = {
-        f"Batch {b['id'][:8]} ({b['total_videos']} videos, {b['status']})": b['id'] 
+        f"Batch {b['id'][:8]} - "
+        f"{b['video_groups']['name'] if b.get('video_groups') else 'No Group'} - "
+        f"{b['prompts']['description'] if b.get('prompts') and b['prompts'] and b['prompts'][0].get('description') else 'No Prompt'} "
+        f"({b.get('total_videos', 0)} videos, {b.get('status', 'unknown')})": b['id'] 
         for b in batches.data
     }
     selected_batch = st.selectbox(
@@ -114,10 +125,11 @@ def show_batch_results():
         show_individual_results(batch_id)
 
 def show_batch_statistics(batch_id):
-    """Show statistics for selected batch"""
-    supabase = init_supabase()
+    """Show statistics for batch with dynamic metrics"""
+    import plotly.express as px
+    import pandas as pd
     
-    # Get all tasks for batch
+    supabase = init_supabase()
     tasks = supabase.table("analysis_tasks") \
         .select("*, videos(*), prompts(*)") \
         .eq("batch_id", batch_id) \
@@ -127,30 +139,196 @@ def show_batch_statistics(batch_id):
         st.warning("No tasks found for this batch")
         return
 
-    # Calculate statistics
-    total_tasks = len(tasks.data)
-    completed_tasks = sum(1 for t in tasks.data if t['status'] == 'completed')
-    failed_tasks = sum(1 for t in tasks.data if t['status'] == 'failed')
-    pending_tasks = sum(1 for t in tasks.data if t['status'] == 'pending')
+    # Extract all metrics from completed tasks
+    metrics_data = []
+    for task in tasks.data:
+        if task['status'] == 'completed' and task.get('result'):
+            parsed = parse_analysis_result(task['result'])
+            if parsed:
+                # Flatten nested dictionaries
+                flat_metrics = {'video_id': task['video_id']}
+                
+                # Add original score from video metadata
+                if task['videos'].get('metadata', {}).get('score'):
+                    flat_metrics['original_score'] = task['videos']['metadata']['score']
+                
+                # Add other metrics
+                for key, value in parsed.items():
+                    if isinstance(value, dict) and 'level' in value:
+                        flat_metrics[key] = value['level']
+                    else:
+                        flat_metrics[key] = value
+                metrics_data.append(flat_metrics)
 
-    # Display statistics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Tasks", total_tasks)
-    with col2:
-        st.metric("Completed", completed_tasks)
-    with col3:
-        st.metric("Failed", failed_tasks)
-    with col4:
-        st.metric("Pending", pending_tasks)
+    if not metrics_data:
+        st.warning("No completed analysis data available")
+        return
 
-    # Show completion percentage
-    if total_tasks > 0:
-        progress = completed_tasks / total_tasks
-        st.progress(progress)
-        st.caption(f"{progress:.1%} Complete")
+    df = pd.DataFrame(metrics_data)
+    
+    # Identify numerical columns (metrics)
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+
+    # Create tabs for different visualization categories
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Distributions", "📈 Trends", "🔄 Correlations", "📊 Rankings"])
+
+    with tab1:
+        st.subheader("Score Distributions")
+        
+        # Distribution plots with multiple visualization options
+        for col in numeric_cols:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Histogram with box plot
+                fig = px.histogram(
+                    df, x=col,
+                    title=f"{col} Distribution",
+                    nbins=20,
+                    marginal="box"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Violin plot
+                fig = px.violin(
+                    df, y=col,
+                    title=f"{col} Violin Plot",
+                    box=True,
+                    points="all"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        st.subheader("Score Trends")
+        
+        # Line plots showing trends across videos
+        for col in numeric_cols:
+            fig = px.line(
+                df.sort_values(col),
+                y=col,
+                title=f"{col} Trend Across Videos",
+                markers=True
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add percentile analysis
+            percentiles = df[col].quantile([0.25, 0.5, 0.75])
+            col1, col2, col3 = st.columns(3)
+            col1.metric("25th Percentile", f"{percentiles[0.25]:.2f}")
+            col2.metric("Median", f"{percentiles[0.5]:.2f}")
+            col3.metric("75th Percentile", f"{percentiles[0.75]:.2f}")
+
+    with tab3:
+        st.subheader("Correlations Between Metrics")
+        
+        # Correlation heatmap
+        corr = df[numeric_cols].corr()
+        fig = px.imshow(
+            corr,
+            title="Correlation Matrix",
+            color_continuous_scale='RdBu_r',
+            aspect='auto',
+            labels=dict(color="Correlation")
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Scatter matrix for selected metrics
+        if len(numeric_cols) > 1:
+            fig = px.scatter_matrix(
+                df[numeric_cols],
+                title="Scatter Plot Matrix",
+                dimensions=numeric_cols
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tab4:
+        st.subheader("Metric Rankings and Comparisons")
+        
+        # Bar charts showing ranking of videos by each metric
+        for col in numeric_cols:
+            fig = px.bar(
+                df.sort_values(col, ascending=False),
+                y=col,
+                title=f"Videos Ranked by {col}",
+                labels={col: "Score", "index": "Video Rank"}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show summary statistics
+            stats = df[col].describe()
+            cols = st.columns(4)
+            cols[0].metric("Mean", f"{stats['mean']:.2f}")
+            cols[1].metric("Std Dev", f"{stats['std']:.2f}")
+            cols[2].metric("Min", f"{stats['min']:.2f}")
+            cols[3].metric("Max", f"{stats['max']:.2f}")
+
+    # Add overall insights
+    st.subheader("📝 Key Insights")
+    
+    # Show highest and lowest scoring videos for each metric
+    for col in numeric_cols:
+        with st.expander(f"Top/Bottom Videos by {col}"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("Top 3 Videos:")
+                st.dataframe(df.nlargest(3, col)[['video_id', col]])
+            with col2:
+                st.write("Bottom 3 Videos:")
+                st.dataframe(df.nsmallest(3, col)[['video_id', col]])
+
+    # Only show original vs overall score comparison if original scores exist
+    if 'original_score' in df.columns:
+        st.subheader("🎯 Original vs Overall Score Analysis")
+        
+        fig = px.scatter(
+            df,
+            x='original_score',
+            y='overall_score',
+            trendline="ols",
+            title="Original Score vs Overall Score Correlation",
+            labels={
+                'original_score': 'Original Score',
+                'overall_score': 'Overall Score'
+            }
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Calculate correlation coefficient
+        correlation = df['original_score'].corr(df['overall_score'])
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Correlation Coefficient", f"{correlation:.3f}")
+            st.caption("1.0 = Perfect positive correlation\n-1.0 = Perfect negative correlation\n0 = No correlation")
+        
+        with col2:
+            score_diff = abs(df['original_score'] - df['overall_score'])
+            agreement = (score_diff <= 100).mean() * 100
+            st.metric("Score Agreement", f"{agreement:.1f}%")
+            st.caption("Percentage of scores within 100 points difference")
+        
+        fig = px.histogram(
+            df.melt(value_vars=['original_score', 'overall_score']),
+            x='value',
+            color='variable',
+            barmode='overlay',
+            opacity=0.7,
+            title="Score Distribution Comparison",
+            labels={
+                'value': 'Score',
+                'variable': 'Score Type'
+            }
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 def show_individual_results(batch_id):
+    # Add sort state management
+    if 'sort_field' not in st.session_state:
+        st.session_state.sort_field = None
+    if 'sort_direction' not in st.session_state:
+        st.session_state.sort_direction = 'desc'
+
     # Initialize session state for JSON toggles if not exists
     if 'json_toggles' not in st.session_state:
         st.session_state.json_toggles = {}
@@ -173,6 +351,25 @@ def show_individual_results(batch_id):
     )
 
     filtered_tasks = [t for t in tasks.data if t['status'] in status_filter]
+
+    # Sort tasks if sort field is set
+    if st.session_state.sort_field:
+        filtered_tasks.sort(
+            key=lambda t: (
+                parse_analysis_result(t['result']).get(st.session_state.sort_field, {})
+                .get('level', 0) if isinstance(parse_analysis_result(t['result'])
+                .get(st.session_state.sort_field), dict)
+                else parse_analysis_result(t['result']).get(st.session_state.sort_field, 0)
+            ) if t['result'] else 0,
+            reverse=st.session_state.sort_direction == 'desc'
+        )
+
+    # At top of show_individual_results
+    sort_icons = {
+        'asc': '↑',
+        'desc': '↓',
+        None: '↕'  # Default icon showing it's sortable
+    }
 
     for task in filtered_tasks:
         st.divider()
@@ -230,7 +427,11 @@ def show_individual_results(batch_id):
                     # Find metrics to display
                     metrics_to_show = []
                     
-                    # Always show overall score first
+                    # Add original score from videos table if it exists
+                    if video.get('metadata', {}).get('score'):
+                        metrics_to_show.append(("Original Score", video['metadata']['score']))
+                    
+                    # Always show overall score next
                     metrics_to_show.append(("Overall Score", parsed_result.get('overall_score', 'N/A')))
                     
                     # Find other metrics by looking for rating/level fields
@@ -238,7 +439,6 @@ def show_individual_results(batch_id):
                         if isinstance(value, dict):
                             for k, v in value.items():
                                 if k.lower() in ('rating', 'level', 'score'):
-                                    # Convert key from camelCase to Title Case
                                     display_name = ''.join(' ' + c if c.isupper() else c for c in key).title()
                                     metrics_to_show.append((display_name, v))
                     
@@ -248,7 +448,32 @@ def show_individual_results(batch_id):
                     
                     for i, (name, value) in enumerate(metrics_to_show):
                         with metrics[i]:
-                            st.metric(name, value, delta=None)
+                            field_key = next((k for k, v in parsed_result.items() 
+                                            if isinstance(v, dict) and 'level' in v 
+                                            and v['level'] == value), 'overall_score')
+                            
+                            # Get current sort icon
+                            current_icon = sort_icons[st.session_state.sort_direction] if st.session_state.sort_field == field_key else sort_icons[None]
+                            
+                            # Sort button first
+                            if st.button(current_icon, key=f"sort_{task['id']}_{field_key}_{name.lower().replace(' ', '_')}"):
+                                if st.session_state.sort_field == field_key:
+                                    st.session_state.sort_direction = 'asc' if st.session_state.sort_direction == 'desc' else 'desc'
+                                else:
+                                    st.session_state.sort_field = field_key
+                                    st.session_state.sort_direction = 'desc'
+                                st.rerun()
+                            
+                            # Then name and value
+                            st.markdown(f"""<p style='text-align: center; 
+                                                      margin-bottom: 0; 
+                                                      min-height: 40px;  /* קבע גובה מינימלי */
+                                                      display: flex; 
+                                                      align-items: center; 
+                                                      justify-content: center;'>{name}</p>""", 
+                                        unsafe_allow_html=True)
+                            st.markdown(f"<h2 style='text-align: center; margin: 0;'>{value}</h2>", unsafe_allow_html=True)
+                            
                     # Generic display of all fields
                     st.markdown("### Analysis Details")
                     excluded_fields = {'overall_score', 'videoQuality', 'audioQuality', 
@@ -261,3 +486,28 @@ def show_individual_results(batch_id):
                 except Exception as e:
                     st.error(f"Failed to parse result: {str(e)}")
                     st.code(str(task['result']))
+
+    st.markdown("""
+        <style>
+        .stButton button {
+            padding: 0px 8px;
+            font-size: 14px;
+            background: transparent;
+            border: none;
+            display: block;
+            margin: 0 auto;
+        }
+        .stButton button:hover {
+            background: #f0f0f0;
+            border: none;
+        }
+        .metric-title {
+            text-align: center;
+            margin-bottom: 0;
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        </style>
+    """, unsafe_allow_html=True)

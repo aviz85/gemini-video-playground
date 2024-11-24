@@ -96,13 +96,15 @@ def create_analysis_batch(videos, prompts, model_name):
         try:
             total_videos = len(videos)
             
-            # Create batch record
+            # Create batch record - add group_id and prompt_id
             batch_response = supabase.table("analysis_batches").insert({
                 "model_name": model_name,
                 "status": "pending",
                 "progress": 0,
                 "total_videos": total_videos,
-                "created_by": st.session_state.user.id
+                "created_by": st.session_state.user.id,
+                "group_id": videos[0]["group_id"],  # All videos in batch are from same group
+                "prompt_id": prompts[0]["id"]  # Store first prompt (or could store in separate table for multiple)
             }).execute()
             
             if not batch_response.data:
