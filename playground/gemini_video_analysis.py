@@ -15,6 +15,7 @@ from utils.auth_manager import show_auth_page
 from utils.supabase_client import init_supabase
 from utils.results_manager import show_batch_results
 from utils.video_processor import process_video_upload
+from utils.semantic_search import show_semantic_search, create_match_videos_function
 
 # Page configuration
 st.set_page_config(
@@ -76,7 +77,8 @@ PAGES = {
     "Prompt Management": show_prompt_management,
     "Video Groups": manage_video_groups,
     "Create Batch": create_batch,
-    "View Results": show_batch_results
+    "View Results": show_batch_results,
+    "Semantic Search": show_semantic_search
 }
 
 def verify_api_key():
@@ -107,6 +109,9 @@ def main():
     if not st.session_state.authenticated:
         show_auth_page()
         return
+    
+    # Create match_videos function if not exists
+    create_match_videos_function()
     
     # Sidebar navigation
     st.sidebar.title("Navigation")

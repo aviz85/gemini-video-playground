@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS videos (
     thumbnail_path TEXT,
     source_url TEXT,
     metadata JSONB DEFAULT '{}'::jsonb,
+    summary_embedding vector(1024),
     is_red BOOLEAN DEFAULT FALSE,
     created_by UUID REFERENCES auth.users(id) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS analysis_tasks (
     prompt_id UUID REFERENCES prompts(id) NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     result JSONB,
+    summary TEXT,
     error TEXT,
     is_red BOOLEAN DEFAULT FALSE,
     created_by UUID REFERENCES auth.users(id) NOT NULL,
@@ -214,4 +216,76 @@ CREATE POLICY analysis_tasks_update ON analysis_tasks
 
 CREATE POLICY analysis_tasks_delete ON analysis_tasks
     FOR DELETE TO authenticated
-    USING (created_by = auth.uid()); 
+    USING (created_by = auth.uid());
+
+-- Function to extract summary from result JSON
+CREATE OR REPLACE FUNCTION extract_summary_from_result()
+RETURNS TRIGGER AS $$
+DECLARE
+    analysis_text TEXT;
+    parsed_json jsonb;
+    extracted_summary TEXT;
+BEGIN
+    -- First try direct access to summary
+    extracted_summary := NEW.result->>'summary';
+    
+    -- If not found, try nested in analysis field
+    IF extracted_summary IS NULL THEN
+        -- Get the analysis text from the result
+        analysis_text := NEW.result->>'analysis';
+        
+        IF analysis_text IS NOT NULL THEN
+            -- Remove the ```json\n prefix and \n``` suffix if they exist
+            analysis_text := regexp_replace(analysis_text, '^```json\n', '');
+            analysis_text := regexp_replace(analysis_text, '\n```$', '');
+            
+            -- Try to parse the cleaned JSON string
+            BEGIN
+                parsed_json := analysis_text::jsonb;
+                -- Extract summary from the parsed JSON
+                extracted_summary := parsed_json->>'summary';
+            EXCEPTION WHEN OTHERS THEN
+                -- If JSON parsing fails, return NULL
+                extracted_summary := NULL;
+            END;
+        END IF;
+    END IF;
+    
+    -- Clean up the summary if found
+    IF extracted_summary IS NOT NULL THEN
+        -- Remove escaped newlines and extra whitespace
+        extracted_summary := regexp_replace(extracted_summary, '\\n', ' ', 'g');
+        extracted_summary := regexp_replace(extracted_summary, '\s+', ' ', 'g');
+        extracted_summary := trim(extracted_summary);
+        
+        -- Remove surrounding quotes if they exist
+        IF left(extracted_summary, 1) = '"' AND right(extracted_summary, 1) = '"' THEN
+            extracted_summary := substring(extracted_summary FROM 2 FOR length(extracted_summary) - 2);
+        END IF;
+    END IF;
+    
+    -- Update the summary column
+    NEW.summary := extracted_summary;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create trigger to automatically extract summary on insert or update
+DROP TRIGGER IF EXISTS extract_summary_trigger ON analysis_tasks;
+CREATE TRIGGER extract_summary_trigger
+    BEFORE INSERT OR UPDATE OF result
+    ON analysis_tasks
+    FOR EACH ROW
+    EXECUTE FUNCTION extract_summary_from_result();
+
+-- Add RLS policy for the function
+ALTER FUNCTION extract_summary_from_result() SECURITY DEFINER;
+
+-- Grant execute permission to authenticated users
+GRANT EXECUTE ON FUNCTION extract_summary_from_result() TO authenticated;
+
+-- Update existing records
+UPDATE analysis_tasks
+SET result = result
+WHERE result IS NOT NULL; 
