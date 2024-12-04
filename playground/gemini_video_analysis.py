@@ -14,6 +14,7 @@ from utils.batch_manager import create_batch
 from utils.auth_manager import show_auth_page
 from utils.supabase_client import init_supabase
 from utils.results_manager import show_batch_results
+from utils.video_processor import process_video_upload
 
 # Page configuration
 st.set_page_config(
@@ -22,7 +23,56 @@ st.set_page_config(
     layout="wide"
 )
 
+def show_quick_analysis():
+    """Simple single video analysis page"""
+    st.header("Quick Video Analysis")
+    
+    # Video upload
+    video = st.file_uploader("Upload video", type=["mp4", "mov", "avi"])
+    
+    # Analysis prompt
+    prompt = st.text_area("Analysis prompt", 
+                         "Analyze this video and provide detailed feedback in JSON format.")
+    
+    if video and prompt and st.button("Analyze"):
+        # Create temporary group for the video
+        supabase = init_supabase()
+        temp_group = supabase.table("video_groups").insert({
+            "name": "Quick Analysis",
+            "created_by": st.session_state.user.id,
+            "is_temporary": True
+        }).execute()
+        
+        # Process video upload
+        st.info("Uploading video...")
+        process_video_upload(
+            video, 
+            source_url=None,
+            group_id=temp_group.data[0]['id']
+        )
+        
+        # Run analysis
+        st.info("Running analysis...")
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        
+        # Convert video to bytes and create blob
+        video_bytes = video.getvalue()
+        video_parts = [
+            {
+                "mime_type": video.type,
+                "data": video_bytes
+            }
+        ]
+        
+        # Generate content with video parts
+        response = model.generate_content([prompt, *video_parts])
+        
+        # Show raw results
+        st.text_area("Analysis Results", response.text, height=400)
+        st.success("✅ Analysis complete")
+
 PAGES = {
+    "Quick Analysis": show_quick_analysis,
     "Prompt Management": show_prompt_management,
     "Video Groups": manage_video_groups,
     "Create Batch": create_batch,

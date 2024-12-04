@@ -29,12 +29,13 @@ def upload_to_gemini(file_path, mime_type):
         st.error(f"Failed to upload to Gemini: {str(e)}")
         return None
 
-def add_video_group(name, description):
+def add_video_group(name, description, is_red=False):
     """Add new video group"""
     supabase = init_supabase()
     return supabase.table("video_groups").insert({
         "name": name,
         "description": description,
+        "is_red": is_red,
         "created_by": st.session_state.user.id
     }).execute()
 
@@ -127,13 +128,19 @@ def upload_thumbnail(video_id, thumb_data):
 def add_video(gemini_file_id, group_id, metadata=None, thumbnail_path=None, source_url=None):
     """Add video to database"""
     supabase = init_supabase()
+    
+    # Get group info to check if it's red
+    group = supabase.table("video_groups").select("*").eq("id", group_id).single().execute()
+    is_red = group.data.get("is_red", False)
+    
     return supabase.table("videos").insert({
         "gemini_file_id": gemini_file_id,
         "group_id": group_id,
         "thumbnail_path": thumbnail_path,
         "source_url": source_url,
         "metadata": metadata or {},  # Default empty JSON if None
-        "created_by": st.session_state.user.id
+        "created_by": st.session_state.user.id,
+        "is_red": is_red  # Add is_red from group
     }).execute()
 
 def get_group_videos(group_id):
@@ -174,21 +181,30 @@ def download_video_from_url(url):
 def process_video_upload(video_data, source_url, group_id, mime_type=None, metadata=None):
     """Process video upload from either file or URL"""
     with st.status("Processing video...") as status:
-        # Generate thumbnail
-        status.write("Generating thumbnail...")
-        thumb_data = generate_thumbnail(video_data)
+        # Get group info
+        supabase = init_supabase()
+        group = supabase.table("video_groups").select("*").eq("id", group_id).single().execute()
+        is_red = group.data.get("is_red", False)
+        
+        thumb_data = None
+        if not is_red:
+            # Generate thumbnail
+            status.write("Generating thumbnail...")
+            thumb_data = generate_thumbnail(video_data)
         
         # Upload to Gemini
         status.write("Uploading to Gemini...")
         mime_type = mime_type or getattr(video_data, 'type', 'video/mp4')
         gemini_file_id = upload_to_gemini(video_data, mime_type)
         
-        if gemini_file_id and thumb_data:
-            # Upload thumbnail
-            status.write("Uploading thumbnail...")
-            thumb_path = upload_thumbnail(gemini_file_id, thumb_data)
+        if gemini_file_id:
+            thumb_path = None
+            if thumb_data:
+                # Upload thumbnail
+                status.write("Uploading thumbnail...")
+                thumb_path = upload_thumbnail(gemini_file_id, thumb_data)
             
-            # Add to database with metadata
+            # Add to database with metadata and is_red
             add_video(gemini_file_id, group_id, metadata, thumb_path, source_url)
             status.update(label="✅ Upload complete", state="complete")
         else:
@@ -204,6 +220,7 @@ def manage_video_groups():
         with st.form("add_group"):
             group_name = st.text_input("Group Name")
             description = st.text_area("Description")
+            is_red = st.checkbox("Red List (No Thumbnails)", value=False)
             col1, col2 = st.columns([4,1])
             with col2:
                 submitted = st.form_submit_button("Create", use_container_width=True)
@@ -212,7 +229,7 @@ def manage_video_groups():
                 if not group_name:
                     st.error("Group name is required")
                 else:
-                    add_video_group(group_name, description)
+                    add_video_group(group_name, description, is_red)
                     st.success("Group created!")
                     time.sleep(0.5)
                     st.rerun()
@@ -360,7 +377,7 @@ def manage_video_groups():
                     metadata = {
                         'title': row['title'],
                         'relateId': row['relateId'] if pd.notna(row['relateId']) else None,
-                        'score': int(row['score']) if pd.notna(row['score']) else None
+                        'score': float(row['score']) if pd.notna(row['score']) and row['score'] != '' else None
                     }
                     
                     video_url = row['mediaSharePath']
@@ -529,7 +546,7 @@ def create_metadata_from_row(row):
         return {
             'title': row['title'],
             'relateId': row['relateId'] if pd.notna(row['relateId']) else None,
-            'score': int(row['score']) if pd.notna(row['score']) else None
+            'score': float(row['score']) if pd.notna(row['score']) and row['score'] != '' else None
         }
     else:  # Generic CSV
         metadata = {}
@@ -542,3 +559,19 @@ def create_metadata_from_row(row):
             except json.JSONDecodeError:
                 st.warning(f"Invalid JSON metadata for URL: {row['video_url']}")
         return metadata
+
+def add_analysis_task(batch_id, video_id, prompt_id):
+    """Add analysis task"""
+    supabase = init_supabase()
+    
+    # Get video info to check if it's red
+    video = supabase.table("videos").select("is_red").eq("id", video_id).single().execute()
+    is_red = video.data.get("is_red", False)
+    
+    return supabase.table("analysis_tasks").insert({
+        "batch_id": batch_id,
+        "video_id": video_id,
+        "prompt_id": prompt_id,
+        "status": "pending",
+        "is_red": is_red  # Add is_red from video
+    }).execute()

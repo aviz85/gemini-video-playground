@@ -80,6 +80,36 @@ def display_json_field(key: str, value: Any, level: int = 0):
         if not key.lower().endswith(('level', 'version')):
             st.markdown(f"{indent}**{key}:** {value}")
 
+def flatten_metrics(parsed_result: dict, prefix='') -> dict:
+    """Recursively flatten nested metrics that contain numeric values"""
+    flat = {}
+    for key, value in parsed_result.items():
+        if isinstance(value, dict):
+            # If dict has a 'level' key, use that value
+            if 'level' in value:
+                flat[key] = value['level']
+            # Otherwise recurse with prefix
+            else:
+                flat.update(flatten_metrics(value, f"{prefix}{key}_"))
+        elif isinstance(value, (int, float)):
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+def camel_to_title(name: str) -> str:
+    """Convert camelCase to Title Case with spaces"""
+    # Add space before capital letters and handle consecutive capitals
+    spaced = ''.join(' ' + c if c.isupper() and i > 0 and not name[i-1].isupper() 
+                     else c for i, c in enumerate(name))
+    # Handle special cases like 'ID' or 'URL'
+    words = spaced.strip().split()
+    titled_words = []
+    for word in words:
+        if word.isupper() and len(word) <= 3:  # Keep abbreviations uppercase
+            titled_words.append(word)
+        else:
+            titled_words.append(word.title())
+    return ' '.join(titled_words)
+
 def show_batch_results():
     """Show analysis results"""
     require_auth()
@@ -90,8 +120,8 @@ def show_batch_results():
     batches = supabase.table("analysis_batches") \
         .select("""
             *,
-            video_groups!inner(name),
-            prompts!inner(description, text)
+            video_groups!analysis_batches_group_id_fkey(name, is_red),
+            prompts(description)
         """) \
         .eq("created_by", st.session_state.user.id) \
         .order("created_at", desc=True) \
@@ -101,12 +131,12 @@ def show_batch_results():
         st.info("No analysis batches found")
         return
 
-    # Select batch with enhanced info
+    # Select batch with enhanced info - update access to video_groups
     batch_options = {
         f"Batch {b['id'][:8]} - "
         f"{b['video_groups']['name'] if b.get('video_groups') else 'No Group'} - "
-        f"{b['prompts']['description'] if b.get('prompts') and b['prompts'] and b['prompts'][0].get('description') else 'No Prompt'} "
-        f"({b.get('total_videos', 0)} videos, {b.get('status', 'unknown')})": b['id'] 
+        f"{b['prompts'][0]['description'] if b.get('prompts') else 'No Prompt'} "
+        f"({b.get('total_videos', 0)} videos, {b.get('status', 'unknown')})": b['id']
         for b in batches.data
     }
     selected_batch = st.selectbox(
@@ -281,46 +311,103 @@ def show_batch_statistics(batch_id):
     if 'original_score' in df.columns:
         st.subheader("🎯 Original vs Overall Score Analysis")
         
-        fig = px.scatter(
-            df,
-            x='original_score',
-            y='overall_score',
-            trendline="ols",
-            title="Original Score vs Overall Score Correlation",
-            labels={
-                'original_score': 'Original Score',
-                'overall_score': 'Overall Score'
-            }
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # Get all metrics from the first complete analysis to build columns
+        sample_metrics = next((
+            flatten_metrics(parse_analysis_result(task['result']))
+            for task in tasks.data
+            if task['status'] == 'completed' and task.get('result')
+        ), {})
         
-        # Calculate correlation coefficient
-        correlation = df['original_score'].corr(df['overall_score'])
+        # Update metrics_data to include all flattened metrics
+        metrics_data = []
+        for task in tasks.data:
+            if task['status'] == 'completed' and task.get('result'):
+                parsed = parse_analysis_result(task['result'])
+                if parsed:
+                    flat_metrics = {'video_id': task['video_id']}
+                    if task['videos'].get('metadata', {}).get('score'):
+                        flat_metrics['original_score'] = task['videos']['metadata']['score']
+                    flat_metrics.update(flatten_metrics(parsed))
+                    metrics_data.append(flat_metrics)
+
+        df = pd.DataFrame(metrics_data)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Correlation Coefficient", f"{correlation:.3f}")
-            st.caption("1.0 = Perfect positive correlation\n-1.0 = Perfect negative correlation\n0 = No correlation")
+        # Get all numeric columns except 'original_score' and 'video_id'
+        score_columns = [col for col in df.select_dtypes(include=['int64', 'float64']).columns 
+                        if col not in ['original_score', 'video_id']]
         
-        with col2:
-            score_diff = abs(df['original_score'] - df['overall_score'])
-            agreement = (score_diff <= 100).mean() * 100
-            st.metric("Score Agreement", f"{agreement:.1f}%")
-            st.caption("Percentage of scores within 100 points difference")
+        # Create checkboxes for each score type in a grid layout
+        num_cols = 4
+        num_rows = (len(score_columns) + num_cols - 1) // num_cols
         
-        fig = px.histogram(
-            df.melt(value_vars=['original_score', 'overall_score']),
-            x='value',
-            color='variable',
-            barmode='overlay',
-            opacity=0.7,
-            title="Score Distribution Comparison",
-            labels={
-                'value': 'Score',
-                'variable': 'Score Type'
-            }
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        for row in range(num_rows):
+            cols = st.columns(num_cols)
+            for col in range(num_cols):
+                idx = row * num_cols + col
+                if idx < len(score_columns):
+                    score = score_columns[idx]
+                    # Format display name
+                    display_name = camel_to_title(score)
+                    cols[col].checkbox(
+                        display_name, 
+                        key=f"cb_{score}",
+                        value=(score == 'overall_score')
+                    )
+        
+        # Get selected scores
+        active_scores = [score for score in score_columns 
+                        if st.session_state.get(f"cb_{score}")]
+        
+        if active_scores:
+            # Create scatter plot with multiple traces
+            fig = px.scatter(
+                df.melt(
+                    id_vars=['original_score'],
+                    value_vars=active_scores,
+                    var_name='Score Type',
+                    value_name='Score'
+                ),
+                x='Score',
+                y='original_score',
+                color='Score Type',
+                trendline="ols",
+                title="Original Score vs Selected Scores Correlation",
+                labels={
+                    'original_score': 'Original Score',
+                    'Score': 'Selected Scores',
+                    'Score Type': 'Score Type'
+                }
+            )
+            
+            # Update traces to use formatted names in legend
+            fig.for_each_trace(lambda t: t.update(
+                name=camel_to_title(t.name) if t.name in active_scores 
+                else t.name.replace('_', ' ').title()
+            ))
+            
+            # Update layout for better readability
+            fig.update_layout(
+                height=600,
+                legend=dict(
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=0.01
+                )
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show correlations for active scores
+            correlations = {score: df['original_score'].corr(df[score]) 
+                          for score in active_scores}
+            
+            # Display correlations in a grid
+            corr_cols = st.columns(min(4, len(correlations)))
+            for i, (score, corr) in enumerate(correlations.items()):
+                with corr_cols[i % 4]:
+                    display_name = camel_to_title(score)
+                    st.metric(f"{display_name}", f"{corr:.3f}")
 
 def show_individual_results(batch_id):
     # Add sort state management
@@ -340,9 +427,21 @@ def show_individual_results(batch_id):
             'visible_columns': ['title', 'status', 'overall_score']
         }
 
+    # Get batch info including group details
     supabase = init_supabase()
+    batch = supabase.table("analysis_batches") \
+        .select("""
+            *,
+            video_groups!analysis_batches_group_id_fkey(*)
+        """) \
+        .eq("id", batch_id) \
+        .single() \
+        .execute()
+    
+    is_red = batch.data['video_groups']['is_red'] if batch.data.get('video_groups') else False
+
     tasks = supabase.table("analysis_tasks") \
-        .select("*, videos(id, thumbnail_path, source_url, metadata)") \
+        .select("*, videos(id, thumbnail_path, source_url, metadata, is_red)") \
         .eq("batch_id", batch_id) \
         .execute()
 
@@ -361,11 +460,11 @@ def show_individual_results(batch_id):
 
     # Pagination
     items_per_page = 20
-    total_pages = len(filtered_tasks) // items_per_page + (1 if len(filtered_tasks) % items_per_page else 0)
+    total_pages = max(1, len(filtered_tasks) // items_per_page + (1 if len(filtered_tasks) % items_per_page else 0))
     
     col1, col2, col3 = st.columns([2, 4, 2])
     with col2:
-        current_page = st.selectbox('Page', range(1, total_pages + 1), 1) if total_pages > 0 else 1
+        current_page = st.selectbox('Page', range(1, total_pages + 1), 0)
     
     start_idx = (current_page - 1) * items_per_page
     end_idx = min(start_idx + items_per_page, len(filtered_tasks))
@@ -398,26 +497,29 @@ def show_individual_results(batch_id):
     for task in page_tasks:
         st.divider()
         
-        # Get video details
         video = task['videos']
         title = video.get('metadata', {}).get('title', video['id'])
+        # Get is_red from the task/video
+        is_red = task.get('is_red', False) or video.get('is_red', False)
         
-        # Create columns for thumbnail and details
         col1, col2 = st.columns([1, 2])
         
         with col1:
             st.subheader(title)
             
-            # Display video player if source_url exists, otherwise show thumbnail
+            # Modified video display logic
             if video['source_url']:
-                st.video(video['source_url'])
-            elif video['thumbnail_path']:
+                if is_red:
+                    st.markdown(f"[🔗 Open Video]({video['source_url']})")
+                else:
+                    st.video(video['source_url'])
+            elif video['thumbnail_path'] and not is_red:
                 try:
                     thumbnail_url = supabase.storage.from_('videos').get_public_url(video['thumbnail_path'])
                     st.image(thumbnail_url, use_container_width=True)
                 except Exception as e:
                     st.error(f"Failed to load thumbnail: {str(e)}")
-            
+
             st.write("**Status:**", task['status'])
             if task['status'] == 'failed':
                 st.error(f"Error: {task.get('error', 'Unknown error')}")
